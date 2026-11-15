@@ -1,6 +1,6 @@
 # Arsitektur dan pilihan reproduksi
 
-Implementasi ini memisahkan pemilihan kandidat, encoding teks, pembentukan graf, dan pelatihan learner. Pipeline utamanya adalah `prepare → encode → run`; `smoke` hanya mengorkestrasi tiga tahap tersebut dengan batas data dan epoch yang tegas.
+Implementasi ini memisahkan pemilihan kandidat, encoding teks, pembentukan graf, dan pelatihan learner. Pipeline `prepare → encode → run` tetap tersedia; konfigurasi matriks `benchmark` menambah baseline, resume, replay checkpoint, dan report terverifikasi tanpa mengubah jalur lama.
 
 ## Unit data dan label
 
@@ -12,8 +12,8 @@ Pemetaan label tetap eksplisit: `0 = right_answer` dan `1 = hallucinated_answer`
 
 - Model: `microsoft/deberta-v3-base`, revision Hugging Face immutable `8ccc9b6f36199bec6961081d44eb72fb3f7353f3`.[4]
 - Encoder dibekukan (`eval`, `requires_grad=False`, `no_grad`) dan dijalankan di CPU.
-- Default input adalah pasangan tokenizer `(question, answer)`; `knowledge` tidak disertakan. `--include-knowledge` menambahkan `Knowledge: ...` pada konteks dan merupakan varian lokal, bukan default.
-- Tokenisasi menggunakan pemotongan maksimum 96 token pada smoke dan batch berukuran 4. Fitur adalah hidden state layer terakhir pada posisi `[CLS]`, berukuran 768.
+- Input context default adalah pertanyaan, dipasangkan dengan kandidat jawaban sebagai urutan kedua tokenizer; field `knowledge` tidak disertakan. `--include-knowledge` menambahkan `Knowledge: ...` pada konteks dan merupakan varian lokal, bukan default.
+- Tokenisasi memakai batch berukuran 4 dan fitur hidden state layer terakhir pada posisi `[CLS]`, berukuran 768. Smoke dibatasi 96 token; konfigurasi QA penuh memakai maksimum 512 token.
 - Tokenizer SentencePiece lambat (`use_fast=False`) dipakai langsung; jalur ini menghindari konversi ke tokenizer cepat dan kebutuhan converter protobuf opsional.
 - Metadata embeddings mencatat prepared-file hash, model, revision yang diminta dan terselesaikan, hash isi state-dict model, kebijakan konteks, pooling, dimensi, batch, dan panjang token.
 
@@ -45,7 +45,13 @@ Parameter count di tabel adalah parameter learner trainable, tidak termasuk enco
 
 Training memakai fitur dan topologi seluruh node (protokol transduktif); loss cross-entropy berbobot kelas dihitung hanya pada train mask. Validation labels memilih checkpoint dengan loss minimum dan early stopping. Test labels tidak memengaruhi gradien atau pemilihan checkpoint; test metrics dihitung setelah checkpoint terbaik dimuat. Fitur test tetap terlihat pada graph message passing, sesuai interpretasi full-graph transduktif, bukan evaluasi inductive.[1]
 
-Smoke menguji setiap 5 epoch, paling banyak 20 epoch, patience 3. Paper menggunakan learning rate `0.005`, weight decay `0.0005`, threshold `0.8`, dan menguji `k ∈ {2,5,10}`; jadwal validasi artikel memiliki ketidakselarasan antara prosa dan algoritme.[1] Konfigurasi smoke memakai `k=5` dan interval 5 khusus untuk memeriksa jalur cepat; hasilnya bukan tabel paper.
+Smoke memakai `τ=0.8`, `k=5`, learning rate `0.005`, weight decay `0.0005`, maksimal 20 epoch, validasi setiap 5 epoch, patience 3, dan seed 42. Konfigurasi benchmark penuh tersedia terpisah; paper menggunakan learning rate `0.005`, weight decay `0.0005`, threshold `0.8`, dan menguji `k ∈ {2,5,10}`; jadwal validasi artikel memiliki ketidakselarasan antara prosa dan algoritme.[1]
+
+## Matriks, pembanding, dan provenance
+
+`configs/qa-full.yaml` memakai fitur 10K yang sudah dikodekan; `qa-multiseed.yaml` menggunakan split yang sama untuk seed learner 42/43/44. Matriks membangun graph/Laplacian encoding sekali per k, lalu menjalankan GCN/GAT/GT, frozen-feature `linear`, dan cosine kNN yang hanya memakai label train. Fine-tuned DeBERTa adalah classifier tersendiri yang dapat diaktifkan; ia bukan alias untuk baseline linear.
+
+Setiap run menyimpan hash sumber/prepared/features/model/config, graph dan LPE yang digunakan, checkpoint terbaik, history, probabilitas prediksi semua node, serta metrik validasi/test. Resume hanya melewati artefak lengkap dengan semua hash cocok. Replay memverifikasi checkpoint pada pool transduktif yang sama; ia bukan inferensi untuk node baru. `report` membuat CSV/Markdown dari manifest dan metrik ber-hash, memisahkan hasil per seed, agregat, hasil pilihan validasi, dan job yang masih pending. Detail konfigurasi dan CLI ada di [panduan eksperimen](experiments.md).
 
 ## Sources
 

@@ -11,10 +11,10 @@
 | Transformers | `>=4.48,<5` | DeBERTa-v3-base dan tokenizer |
 | SentencePiece | `>=0.2,<1` | Tokenizer DeBERTa slow |
 | NumPy / SciPy | `numpy>=1.26,<3`, `scipy>=1.12,<2` | Array, k-NN graph support, eigenvectors |
-| scikit-learn | `>=1.4,<2` | Accuracy, precision, recall, binary F1 |
+| scikit-learn | `>=1.4,<2` | Classification metrics and AUROC/AUPRC support |
 | pytest / Ruff | dev extra: `pytest>=8,<9`, `ruff>=0.9,<1` | Tes, lint, format |
 
-Versi konkret yang terpasang dikunci di `uv.lock`. Runtime smoke yang tercatat menggunakan PyTorch CPU dan dua thread; tidak memerlukan CUDA, akun layanan, API berbayar, atau dashboard. `uv sync --extra dev` memasang proyek beserta dependensi dev.
+Versi konkret yang terpasang dikunci di `uv.lock`. Smoke CPU historis memakai dua thread; `qa-full` default memakai CPU dan empat thread. CUDA tidak dijalankan di environment Torch CPU-only ini. Workflow CI memakai fixture lokal sehingga tidak memerlukan download model; tidak ada akun layanan atau API berbayar.
 
 ## Artefak eksternal
 

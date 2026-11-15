@@ -57,6 +57,19 @@ uv run graphhall run \
 
 `run` mewajibkan IDs embeddings sama persis dengan urutan kandidat prepared. Bila sidecar encoder menyatakan `prepared_jsonl_sha256` atau `row_count`, keduanya harus cocok; mismatch menghentikan run sebelum training. NPZ fitur tanpa sidecar tetap dapat dipakai untuk fixture lokal, tetapi provenance encoder akan ditandai tidak diketahui.
 
+## Matriks QA penuh
+
+Berbeda dari `configs/smoke.yaml`, `configs/qa-full.yaml` dan `configs/qa-multiseed.yaml` adalah konfigurasi executable untuk `benchmark`. Keduanya memakai kembali file prepared/embeddings 10K yang sudah tersedia dan raw source pinned; tidak menjalankan ulang persiapan atau encoding. Benchmark menolak hash sumber, split, encoder, atau fitur yang tidak cocok dan tidak menimpa input.
+
+```bash
+uv run graphhall benchmark --config configs/qa-full.yaml
+uv run graphhall benchmark --config configs/qa-full.yaml --resume
+uv run graphhall report --input-dir results/qa-full --output-dir reports/qa-full
+uv run graphhall predict --run-dir results/qa-full/runs/gcn-seed42-k2 --learner gcn
+```
+
+Satu run per learner/seed/k menyimpan hash input/config, graph/LPE, checkpoint/history, prediksi berprobabilitas, metrik, dan manifest completion. Resume hanya memakai hasil lengkap yang terverifikasi; hasil konfigurasi terpilih berasal dari validasi, bukan skor test. Replay dibatasi pada pool transduktif yang sama. Lihat [bootstrap clone baru, detail matriks, dan batasan](experiments.md), serta [hasil 39 job yang telah dieksekusi](results.md).
+
 ## Pemilihan sampel dan evaluasi
 
 HaluEval-QA mempunyai 10.000 rekaman sumber dengan dua field jawaban per rekaman.[2][3] Implementasi mengambil 60 rekaman secara deterministik, membagi rekaman induk 80/10/10 menjadi 48/6/6, lalu memilih satu kandidat per rekaman dengan label seimbang per split. `0` adalah jawaban faktual (`right_answer`), `1` adalah jawaban hallucinated. Kebijakan ini mengikuti unit kandidat yang digunakan evaluasi QA upstream, tetapi seed/split 60 sampel adalah keputusan smoke lokal, bukan rekonstruksi split paper.[1][2]
