@@ -12,9 +12,12 @@ from urllib.request import Request, urlopen
 import numpy as np
 import torch
 
+from graphhall.baselines import finetune_classifier
 from graphhall.data import split_candidate_records
 from graphhall.encoder import encode_prepared
+from graphhall.experiments import replay_predictions, run_benchmark
 from graphhall.graph import build_knn_graph, laplacian_positional_encoding
+from graphhall.reporting import generate_report
 from graphhall.train import train_model
 
 HALUEVAL_QA_REVISION = "b7253db3cdaa0ab2c382f92b26b390109174f77e"
@@ -108,6 +111,7 @@ def encode_command(args: argparse.Namespace) -> int:
         max_length=args.max_length,
         include_knowledge=args.include_knowledge,
         cache_dir=args.cache_dir,
+        device=getattr(args, "device", "cpu"),
     )
     print(
         f"Encoded {metadata['row_count']} candidates as {metadata['hidden_size']}-D features "
@@ -154,8 +158,8 @@ def run_command(args: argparse.Namespace) -> int:
     if not np.isfinite(args.threshold):
         raise ValueError("threshold must be finite")
     learners = [part.strip().lower() for part in args.learners.split(",") if part.strip()]
-    if not learners or set(learners) - {"gcn", "gat", "gt"}:
-        raise ValueError("--learners must be a comma-separated subset of gcn,gat,gt")
+    if not learners or set(learners) - {"gcn", "gat", "gt", "linear"}:
+        raise ValueError("--learners must be a comma-separated subset of gcn,gat,gt,linear")
     if len(set(learners)) != len(learners):
         raise ValueError("--learners must not contain duplicates")
 
@@ -181,6 +185,7 @@ def run_command(args: argparse.Namespace) -> int:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     result_rows: list[dict[str, Any]] = []
     prediction_rows: list[dict[str, Any]] = []
+    probability_rows: list[dict[str, Any]] = []
     histories: dict[str, list[dict[str, float | int]]] = {}
 
     for learner in learners:
@@ -210,6 +215,8 @@ def run_command(args: argparse.Namespace) -> int:
             validation_interval=args.validation_interval,
             patience=args.patience,
             seed=args.seed,
+            device=getattr(args, "device", "cpu"),
+            model_profile=getattr(args, "model_profile", "weighted"),
         )
         histories[learner] = fitted["history"]
         result_rows.append(
@@ -221,10 +228,19 @@ def run_command(args: argparse.Namespace) -> int:
                 "parameter_count": fitted["parameter_count"],
                 "best_epoch": fitted["best_epoch"],
                 "best_validation_loss": fitted["best_validation_loss"],
+                "validation_metrics": fitted["validation_metrics"],
                 "metrics": fitted["metrics"],
             }
         )
-        for row, prediction in zip(rows, fitted["predictions"], strict=True):
+        fitted_probabilities = np.asarray(fitted["probabilities"], dtype=np.float64)
+        if (
+            fitted_probabilities.shape != (len(rows), 2)
+            or not np.isfinite(fitted_probabilities).all()
+        ):
+            raise ValueError("trained model probabilities must be a finite N x 2 array")
+        for row, prediction, probability in zip(
+            rows, fitted["predictions"], fitted_probabilities, strict=True
+        ):
             prediction_rows.append(
                 {
                     "record_id": row["record_id"],
@@ -233,6 +249,19 @@ def run_command(args: argparse.Namespace) -> int:
                     "predicted_label": int(prediction),
                     "learner": learner,
                     "k": args.k,
+                    "probability_0": float(probability[0]),
+                    "probability_1": float(probability[1]),
+                }
+            )
+            probability_rows.append(
+                {
+                    "record_id": row["record_id"],
+                    "split": row["split"],
+                    "gold_label": row["label"],
+                    "learner": learner,
+                    "k": args.k,
+                    "probability_0": float(probability[0]),
+                    "probability_1": float(probability[1]),
                 }
             )
 
@@ -265,6 +294,8 @@ def run_command(args: argparse.Namespace) -> int:
         "patience": args.patience,
         "seed": args.seed,
         "threads": args.threads,
+        "device": getattr(args, "device", "cpu"),
+        "model_profile": getattr(args, "model_profile", "weighted"),
         "split_counts": dict(Counter(splits)),
         "directed_edge_orientation": "neighbor_source_to_query_target",
         "train_loss_labels": "train split only",
@@ -302,10 +333,34 @@ def run_command(args: argparse.Namespace) -> int:
     with (output_dir / "predictions.csv").open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(
             stream,
-            fieldnames=["record_id", "split", "gold_label", "predicted_label", "learner", "k"],
+            fieldnames=[
+                "record_id",
+                "split",
+                "gold_label",
+                "predicted_label",
+                "learner",
+                "k",
+                "probability_0",
+                "probability_1",
+            ],
         )
         writer.writeheader()
         writer.writerows(prediction_rows)
+    with (output_dir / "probabilities.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=[
+                "record_id",
+                "split",
+                "gold_label",
+                "learner",
+                "k",
+                "probability_0",
+                "probability_1",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(probability_rows)
     (output_dir / "histories.json").write_text(
         json.dumps(histories, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -349,6 +404,7 @@ def smoke_command(args: argparse.Namespace) -> int:
             max_length=args.max_length,
             include_knowledge=args.include_knowledge,
             cache_dir=args.cache_dir,
+            device=args.device,
         )
     )
     return run_command(
@@ -366,9 +422,62 @@ def smoke_command(args: argparse.Namespace) -> int:
             patience=args.patience,
             seed=args.seed,
             threads=args.threads,
+            device=args.device,
+            model_profile=args.model_profile,
             run_type="smoke",
         )
     )
+
+
+def benchmark_command(args: argparse.Namespace) -> int:
+    result = run_benchmark(args.config, resume=args.resume)
+    print(
+        f"Benchmark {result['name']}: {result['completed_count']} completed, "
+        f"{result['pending_count']} pending -> {result['output_dir']}"
+    )
+    return 0
+
+
+def report_command(args: argparse.Namespace) -> int:
+    result = generate_report(args.input_dir, args.output_dir)
+    print(
+        f"Report: {result['completed_count']} completed, {result['pending_count']} pending; "
+        f"CSV {result['csv_path']}, Markdown {result['markdown_path']}"
+    )
+    return 0
+
+
+def predict_command(args: argparse.Namespace) -> int:
+    result = replay_predictions(args.run_dir, learner=args.learner)
+    print(
+        f"Replay verified for {result['experiment_id']} ({result['row_count']} transductive rows); "
+        f"max probability error={result['max_absolute_error']:.3g}"
+    )
+    return 0
+
+
+def finetune_command(args: argparse.Namespace) -> int:
+    result = finetune_classifier(
+        args.input,
+        args.output_dir,
+        model_name=args.model_name,
+        revision=args.revision,
+        device=args.device,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        epochs=args.epochs,
+        learning_rate=args.learning_rate,
+        seed=args.seed,
+        gradient_accumulation=args.gradient_accumulation,
+        max_steps=args.max_steps,
+        cache_dir=args.cache_dir,
+    )
+    run_kind = "capped integration" if result.get("not_full_training") else "full training schedule"
+    print(
+        f"Fine-tuned DeBERTa completed {run_kind}; best epoch={result['best_epoch']}, "
+        f"checkpoint={result['checkpoint_path']}"
+    )
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -393,6 +502,7 @@ def _build_parser() -> argparse.ArgumentParser:
     encode.add_argument("--max-length", type=int, default=96)
     encode.add_argument("--include-knowledge", action="store_true")
     encode.add_argument("--cache-dir")
+    encode.add_argument("--device", choices=("cpu", "cuda", "auto"), default="cpu")
     encode.set_defaults(handler=encode_command)
 
     run = subparsers.add_parser(
@@ -411,6 +521,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--patience", type=int, default=3)
     run.add_argument("--seed", type=int, default=42)
     run.add_argument("--threads", type=int, default=2)
+    run.add_argument("--device", choices=("cpu", "cuda", "auto"), default="cpu")
+    run.add_argument("--model-profile", choices=("weighted", "topology"), default="weighted")
     run.add_argument("--run-type", choices=("research", "smoke"), default="research")
     run.set_defaults(handler=run_command)
 
@@ -435,7 +547,47 @@ def _build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--patience", type=int, default=3)
     smoke.add_argument("--seed", type=int, default=42)
     smoke.add_argument("--threads", type=int, default=2)
+    smoke.add_argument("--device", choices=("cpu", "cuda", "auto"), default="cpu")
+    smoke.add_argument("--model-profile", choices=("weighted", "topology"), default="weighted")
     smoke.set_defaults(handler=smoke_command)
+
+    benchmark = subparsers.add_parser("benchmark", help="run a strict YAML experiment matrix")
+    benchmark.add_argument("--config", required=True, help="executable YAML config path")
+    benchmark.add_argument(
+        "--resume", action="store_true", help="verify and reuse exact completed jobs"
+    )
+    benchmark.set_defaults(handler=benchmark_command)
+
+    report = subparsers.add_parser("report", help="aggregate hash-verified experiment artifacts")
+    report.add_argument("--input-dir", required=True, help="benchmark output directory")
+    report.add_argument("--output-dir", required=True, help="generated report directory")
+    report.set_defaults(handler=report_command)
+
+    predict = subparsers.add_parser(
+        "predict", help="replay a checkpoint on its exact transductive pool"
+    )
+    predict.add_argument("--run-dir", required=True, help="completed experiment directory")
+    predict.add_argument(
+        "--learner",
+        choices=("gcn", "gat", "gt", "linear", "knn", "finetuned_deberta"),
+    )
+    predict.set_defaults(handler=predict_command)
+
+    finetune = subparsers.add_parser("finetune", help="fine-tune DeBERTa with a CLS classifier")
+    finetune.add_argument("--input", required=True, help="prepared QA JSONL")
+    finetune.add_argument("--output-dir", required=True)
+    finetune.add_argument("--model-name", default=DEFAULT_MODEL)
+    finetune.add_argument("--revision", default=DEFAULT_MODEL_REVISION)
+    finetune.add_argument("--device", choices=("cpu", "cuda", "auto"), default="cpu")
+    finetune.add_argument("--batch-size", type=int, default=1)
+    finetune.add_argument("--max-length", type=int, default=512)
+    finetune.add_argument("--epochs", type=int, default=3)
+    finetune.add_argument("--learning-rate", type=float, default=2e-5)
+    finetune.add_argument("--seed", type=int, default=42)
+    finetune.add_argument("--gradient-accumulation", type=int, default=8)
+    finetune.add_argument("--max-steps", type=int)
+    finetune.add_argument("--cache-dir")
+    finetune.set_defaults(handler=finetune_command)
     return parser
 
 

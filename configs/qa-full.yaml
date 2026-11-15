@@ -1,0 +1,62 @@
+schema_version: 1
+name: qa-full
+run_type: full
+paths:
+  # Reuse the parent-prepared immutable snapshot; benchmark never re-encodes it.
+  prepared: data/processed/halueval-qa-full.jsonl
+  embeddings: data/processed/halueval-qa-full.npz
+  source: data/raw/qa_data.jsonl
+  output_dir: results/qa-full
+dataset:
+  name: HaluEval-QA
+  source_revision: b7253db3cdaa0ab2c382f92b26b390109174f77e
+  source_sha256: 89ed139ec5e3a3169a0b30e45569ac1283846f76f27f7bb5e908ee6deed57e88
+  source_rows: 10000
+  selected_records: 10000
+  split_seed: 42
+  split_counts:
+    train: 8000
+    val: 1000
+    test: 1000
+encoder:
+  model: microsoft/deberta-v3-base
+  revision: 8ccc9b6f36199bec6961081d44eb72fb3f7353f3
+  device: cpu
+  frozen: true
+  context_policy: question_only
+  include_knowledge: false
+  max_length: 512
+  batch_size: 4
+  pooling: last_hidden_state[:,0,:]
+  hidden_size: 768
+graph:
+  k_values: [2, 5, 10]
+  cosine_threshold: 0.8
+  lpe_dimensions: 10
+training:
+  learners: [gcn, gat, gt]
+  seeds: [42]
+  learning_rate: 0.005
+  weight_decay: 0.0005
+  max_epochs: 400
+  validation_interval: 20
+  patience: 3
+  threads: 4
+  model_profile: weighted
+  selection_metric: f1
+baselines: [linear, knn]
+finetuned_deberta:
+  enabled: false
+  model_name: microsoft/deberta-v3-base
+  revision: 8ccc9b6f36199bec6961081d44eb72fb3f7353f3
+  batch_size: 1
+  max_length: 512
+  epochs: 3
+  learning_rate: 0.00002
+  seed_from_matrix: true
+  gradient_accumulation: 8
+  max_steps: null
+evaluation:
+  positive_label: 1
+  protocol: transductive_full_graph
+  test_labels_used_for_training: false
