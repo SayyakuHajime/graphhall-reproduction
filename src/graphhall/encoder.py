@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+
+from graphhall.runtime import resolve_device
 
 
 def encode_text_pairs(
@@ -18,12 +21,16 @@ def encode_text_pairs(
     *,
     batch_size: int,
     max_length: int,
+    device: str | torch.device = "cpu",
+    mixed_precision: bool = False,
 ) -> np.ndarray:
     """Encode text pairs as frozen last-layer [CLS] vectors using bounded batches."""
     if len(contexts) != len(answers) or not contexts:
         raise ValueError("contexts and answers must have the same nonzero length")
     if batch_size < 1 or not 1 <= max_length <= 512:
         raise ValueError("batch_size must be positive and max_length must be in [1, 512]")
+    resolved_device = resolve_device(device)
+    model.to(resolved_device)
     model.eval()
     model.requires_grad_(False)
     batches: list[np.ndarray] = []
@@ -38,9 +45,22 @@ def encode_text_pairs(
                 max_length=max_length,
                 return_tensors="pt",
             )
-            output = model(**encoded)
+            if isinstance(encoded, Mapping):
+                encoded = {
+                    key: value.to(resolved_device) if isinstance(value, torch.Tensor) else value
+                    for key, value in encoded.items()
+                }
+            elif callable(getattr(encoded, "to", None)):
+                encoded = encoded.to(resolved_device)
+            autocast = (
+                torch.autocast(device_type=resolved_device.type)
+                if mixed_precision
+                else nullcontext()
+            )
+            with autocast:
+                output = model(**encoded)
             cls_vectors = output.last_hidden_state[:, 0, :]
-            batches.append(cls_vectors.detach().to("cpu").numpy().astype(np.float32, copy=False))
+            batches.append(cls_vectors.detach().to(device="cpu", dtype=torch.float32).numpy())
     return np.concatenate(batches, axis=0)
 
 
@@ -73,19 +93,27 @@ def encode_prepared(
     cache_dir: str | Path | None = None,
     tokenizer: Any | None = None,
     model: Any | None = None,
+    device: str | torch.device = "cpu",
+    mixed_precision: bool = False,
 ) -> dict[str, Any]:
     """Encode prepared QA rows and persist features plus model/source provenance."""
     from transformers import AutoModel, AutoTokenizer
 
+    if batch_size < 1 or not 1 <= max_length <= 512:
+        raise ValueError("batch_size must be positive and max_length must be in [1, 512]")
+    resolved_device = resolve_device(device)
     source = Path(prepared_path)
+    if not source.is_file():
+        raise ValueError(f"prepared data file does not exist: {source}")
     rows = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines() if line]
+    if not rows:
+        raise ValueError("prepared data file must contain at least one row")
     if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained(
             model_name, revision=revision, cache_dir=cache_dir, use_fast=False
         )
     if model is None:
         model = AutoModel.from_pretrained(model_name, revision=revision, cache_dir=cache_dir)
-    model.to("cpu")
     contexts = [
         f"{row['question']} Knowledge: {row['knowledge']}" if include_knowledge else row["question"]
         for row in rows
@@ -98,6 +126,8 @@ def encode_prepared(
         model,
         batch_size=batch_size,
         max_length=max_length,
+        device=resolved_device,
+        mixed_precision=mixed_precision,
     )
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +153,8 @@ def encode_prepared(
         else "question_only",
         "pooling": "last_hidden_state[:,0,:]",
         "encoder_frozen": True,
-        "device": "cpu",
+        "device": str(resolved_device),
+        "mixed_precision": mixed_precision,
     }
     config["config_sha256"] = hashlib.sha256(
         json.dumps(config, sort_keys=True).encode("utf-8")
