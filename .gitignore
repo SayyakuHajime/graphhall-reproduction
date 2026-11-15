@@ -1,0 +1,13 @@
+# Project-specific local/generated files
+.venv/
+.verification/
+.cache/
+data/
+results/
+checkpoints/
+*.npz
+*.pt
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/

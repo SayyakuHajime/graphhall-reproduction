@@ -1,0 +1,100 @@
+run_type: smoke
+output_dir: results/smoke-qa-60
+
+# Public inputs pinned to immutable upstream revisions.
+dataset:
+  name: HaluEval-QA
+  url: https://raw.githubusercontent.com/RUCAIBox/HaluEval/b7253db3cdaa0ab2c382f92b26b390109174f77e/data/qa_data.json
+  revision: b7253db3cdaa0ab2c382f92b26b390109174f77e
+  source_sha256: 89ed139ec5e3a3169a0b30e45569ac1283846f76f27f7bb5e908ee6deed57e88
+  source_rows: 10000
+  selected_original_records: 60
+  split_counts:
+    train: 48
+    val: 6
+    test: 6
+  split_seed: 42
+  split_unit: original_record_before_candidate_selection
+  split_ratio: [0.8, 0.1, 0.1]
+  candidate_policy: one seeded label-balanced answer per source record
+  label_mapping:
+    right_answer: 0
+    hallucinated_answer: 1
+
+encoder:
+  model: microsoft/deberta-v3-base
+  revision: 8ccc9b6f36199bec6961081d44eb72fb3f7353f3
+  device: cpu
+  frozen: true
+  context_policy: question_only
+  include_knowledge: false
+  max_length: 96
+  batch_size: 4
+  pooling: last_hidden_state[:,0,:]
+  tokenizer: sentencepiece_slow
+  hidden_size: 768
+
+graph:
+  k: 5
+  cosine_threshold: 0.8
+  threshold_comparison: ">="
+  direction: neighbor_source_to_query_target
+  symmetrize_for_message_passing: false
+  explicit_self_loops: true
+  self_loop_weight: 1.0
+  attention_edge_dim: 1
+  laplacian_positional_encoding:
+    dimensions: 10
+    used_by: gt
+    symmetrize_only_for_lpe: true
+    exclude_zero_eigenmodes: true
+
+learners: [gcn, gat, gt]
+learner_options:
+  gcn:
+    layer: GCNConv
+    input_dim: 768
+    output_dim: 2
+    edge_weight: scalar_cosine
+  gat:
+    layer: GATConv
+    input_dim: 768
+    output_dim: 2
+    heads: 4
+    concat: false
+    dropout: 0.0
+    edge_dim: 1
+  gt:
+    layer: TransformerConv
+    input_dim: 778
+    output_dim: 2
+    heads: 4
+    concat: false
+    beta: true
+    dropout: 0.1
+    root_weight: true
+    edge_dim: 1
+
+training:
+  learning_rate: 0.005
+  weight_decay: 0.0005
+  max_epochs: 20
+  validation_interval: 5 # short smoke schedule; paper config is not asserted
+  patience: 3
+  seed: 42
+  threads: 2
+  checkpoint_selection: minimum_validation_loss
+  loss_label_mask: train_only
+
+evaluation:
+  protocol: transductive_full_graph
+  positive_label: 1
+  positive_label_name: hallucinated_answer
+  metrics: [accuracy, precision, recall, binary_f1]
+  test_labels_used_for_training: false
+
+provenance:
+  prepared_jsonl_sha256: 295b1c0b8da20ea209cc44735e31497469f233f30e6e51c6708d9467974a9395
+  embedding_npz_sha256: 629230aa991c05bbbbb186c2d7a8121d24038696b4252768a16652da15eac2f3
+  loaded_model_state_sha256: b7d2d5b6bb59fe74c90d4406b41e9b8e5e42e5819fd750547a880c0315db2ad4
+  run_config_sha256: 6621153c9e85c73741093545fe9525684abeb7f2823e6f52c367f12ef79c93fd
